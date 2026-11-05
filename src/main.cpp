@@ -23,6 +23,7 @@
 #include <AsyncTCP.h>
 #include <ESPAsyncWebServer.h>
 #include <Update.h>
+#include <Preferences.h>
 #include <esp_arduino_version.h>
 #include <atomic>
 #include <math.h>
@@ -99,6 +100,7 @@ std::atomic<uint32_t> g_hookCount{0};
 std::atomic<bool>     g_gotAnyRequest{false};
 std::atomic<bool>     g_otaActive{false};   // OTA update in progress
 std::atomic<uint32_t> g_rebootAtMs{0};      // If non-zero, loop() restarts at this time
+std::atomic<uint8_t>  g_brightnessPct{DEFAULT_BRIGHTNESS_PCT};  // Set by /brightness, read by render
 
 // Only read/written from the async_tcp task, no lock needed.
 char     g_lastEvent[HookBodyScanner::VAL_MAX] = "-";
@@ -244,7 +246,47 @@ void render(uint32_t now) {
       break;
   }
 
-  for (uint8_t i = 0; i < LED_COUNT; ++i) setLed(i, lv[i]);
+  // Overall brightness scales the perceived level, before gamma, so 50% looks like half as bright.
+  const float brightness = g_brightnessPct.load() / 100.0f;
+  for (uint8_t i = 0; i < LED_COUNT; ++i) setLed(i, lv[i] * brightness);
+}
+
+// ===========================================================================
+// Brightness persistence (NVS flash via Preferences)
+// ===========================================================================
+
+Preferences prefs;
+uint8_t  savedBrightnessPct = 0;
+uint8_t  lastSeenBrightnessPct = 0;
+uint32_t brightnessChangedAtMs = 0;
+
+uint8_t clampBrightness(long pct) {
+  if (pct < MIN_BRIGHTNESS_PCT) return MIN_BRIGHTNESS_PCT;
+  if (pct > 100) return 100;
+  return (uint8_t)pct;
+}
+
+void loadBrightness() {
+  prefs.begin("cclight", false);
+  savedBrightnessPct = clampBrightness(prefs.getUChar("bright", DEFAULT_BRIGHTNESS_PCT));
+  lastSeenBrightnessPct = savedBrightnessPct;
+  g_brightnessPct.store(savedBrightnessPct);
+  Serial.printf("[light] brightness %u%%\n", savedBrightnessPct);
+}
+
+// Dragging the slider sends many values. Write to flash only once it has settled,
+// to spare the flash from wear.
+void saveBrightnessIfSettled(uint32_t now) {
+  const uint8_t pct = g_brightnessPct.load();
+  if (pct != lastSeenBrightnessPct) {
+    lastSeenBrightnessPct = pct;
+    brightnessChangedAtMs = now;
+  }
+  if (pct != savedBrightnessPct && now - brightnessChangedAtMs >= BRIGHTNESS_SAVE_DELAY_MS) {
+    prefs.putUChar("bright", pct);
+    savedBrightnessPct = pct;
+    Serial.printf("[light] brightness %u%% saved\n", pct);
+  }
 }
 
 // ===========================================================================
@@ -570,9 +612,12 @@ const char INDEX_HTML[] PROGMEM = R"HTML(<!doctype html>
  table{border-collapse:collapse;width:100%} td{padding:4px 0;border-bottom:1px solid #222}
  td:first-child{color:#999;width:40%} button{margin:4px 4px 0 0;padding:8px 12px;border:0;border-radius:6px;background:#333;color:#eee;cursor:pointer}
  button:hover{background:#444} code{color:#9cf}
+ .bright{display:flex;align-items:center;gap:12px;margin:0 0 16px} .bright input{flex:1;accent-color:#fdd835}
+ .bright span{min-width:3.5em;text-align:right;font-variant-numeric:tabular-nums}
 </style></head><body>
 <h1>Claude Code Status Light</h1>
 <div class="lamp"><div id="r" class="l r"></div><div id="y" class="l y"></div><div id="g" class="l g"></div></div>
+<label class="bright">Brightness <input id="br" type="range" min="1" max="100" value="50"><span id="brv">-</span></label>
 <table>
  <tr><td>State</td><td id="state">-</td></tr>
  <tr><td>Last event</td><td id="ev">-</td></tr>
@@ -589,7 +634,14 @@ const char INDEX_HTML[] PROGMEM = R"HTML(<!doctype html>
 <script>
 const lamps={working:'r',waiting:'y',done:'g',error:'ryg',test:'ryg',connecting:'',hello:'g',updating:'yg',off:'',stale:'r'};
 async function s(n){await fetch('/state?name='+n);setTimeout(u,150)}
+// Brightness slider: send at most every 80 ms while dragging, always send the final value
+let dragging=false,lastSent=0,pending=null;
+function sendBr(v){lastSent=Date.now();fetch('/brightness?value='+v)}
+br.addEventListener('input',()=>{dragging=true;brv.textContent=br.value+'%';clearTimeout(pending);
+ if(Date.now()-lastSent>=80)sendBr(br.value);else pending=setTimeout(()=>sendBr(br.value),80)});
+br.addEventListener('change',()=>{clearTimeout(pending);sendBr(br.value);dragging=false});
 async function u(){try{const j=await (await fetch('/status')).json();
+ if(!dragging){br.value=j.brightness;brv.textContent=j.brightness+'%'}
  state.textContent=j.state;ev.textContent=j.last_event+(j.last_event_age_s>=0?' ('+j.last_event_age_s+' s ago)':'');
  cnt.textContent=j.hook_count;url.textContent=j.hook_url;rssi.textContent=j.rssi+' dBm';up.textContent=j.uptime_s+' s';
  for(const id of 'ryg')document.getElementById(id).classList.toggle('on',(lamps[j.state]||'').includes(id));
@@ -615,9 +667,25 @@ void setupServer() {
     snprintf(buf, sizeof(buf),
              "{\"state\":\"%s\",\"last_event\":\"%s\",\"last_event_age_s\":%ld,"
              "\"hook_count\":%lu,\"hook_url\":\"http://%s%s\",\"ip\":\"%s\","
-             "\"rssi\":%d,\"uptime_s\":%lu}",
+             "\"rssi\":%d,\"uptime_s\":%lu,\"brightness\":%u}",
              STATE_NAMES[g_shown.load()], g_lastEvent, age, (unsigned long)g_hookCount.load(),
-             ip.c_str(), HOOK_PATH, ip.c_str(), WiFi.RSSI(), (unsigned long)(now / 1000));
+             ip.c_str(), HOOK_PATH, ip.c_str(), WiFi.RSSI(), (unsigned long)(now / 1000),
+             (unsigned)g_brightnessPct.load());
+    req->send(200, "application/json", buf);
+  });
+
+  // Overall brightness: GET /brightness?value=1..100 sets it, GET /brightness reads it
+  server.on("/brightness", HTTP_GET, [](AsyncWebServerRequest* req) {
+    if (req->hasParam("value")) {
+      const String v = req->getParam("value")->value();
+      if (v.length() == 0 || !isdigit((unsigned char)v[0])) {
+        req->send(400, "text/plain", "usage: /brightness?value=1..100\n");
+        return;
+      }
+      g_brightnessPct.store(clampBrightness(v.toInt()));
+    }
+    char buf[32];
+    snprintf(buf, sizeof(buf), "{\"brightness\":%u}", (unsigned)g_brightnessPct.load());
     req->send(200, "application/json", buf);
   });
 
@@ -667,6 +735,7 @@ void setup() {
     ledInit(i);
     setLed(i, 0.0f);
   }
+  loadBrightness();         // Before the first frame, so the boot test uses the saved level
   stateSinceMs = millis();  // The BootTest effect starts now
 
   startWifi();     // Non-blocking; the connection is tracked in loop()
@@ -680,6 +749,7 @@ void loop() {
   handleRequests();
   updateTransients(now);
   checkStale(now);
+  saveBrightnessIfSettled(now);
 
   const uint32_t rebootAt = g_rebootAtMs.load();
   if (rebootAt != 0 && (int32_t)(now - rebootAt) >= 0) {

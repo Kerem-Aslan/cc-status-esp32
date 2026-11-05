@@ -146,6 +146,14 @@ Recommended: **a DHCP reservation on your router.**
 - Don't rely on mDNS names like `cc-status-light.local` on Windows; they don't always resolve.
   Use the IP address in the hooks.
 
+### Brightness
+
+Drag the slider on the status page, or `Invoke-RestMethod "http://$ip/brightness?value=30"`.
+The value (1-100 %) is perceived brightness, applied before gamma correction, so 50 % really looks
+about half as bright. It's saved to the ESP32's flash about 2 seconds after you stop moving the
+slider and survives power cycles. The default before the first change is 50 %
+(`DEFAULT_BRIGHTNESS_PCT` in `config.h`).
+
 ---
 
 ## 3. Testing: by hand first, then with hooks
@@ -157,8 +165,8 @@ $ip = '192.168.1.50'
 ```
 
 ### 3a. From a browser
-Open `http://192.168.1.50/`. The page shows the current state, the last event, and a button
-for each state. The **LED test** button replays the power-on test, which is handy for checking
+Open `http://192.168.1.50/`. The page shows the current state, the last event, a
+**brightness slider**, and a button for each state. The **LED test** button replays the power-on test, which is handy for checking
 the wiring.
 
 ### 3b. Change state by hand from PowerShell
@@ -171,6 +179,7 @@ Invoke-RestMethod "http://$ip/state?name=off"       # all off
 Invoke-RestMethod "http://$ip/state?name=stale"     # dim red (no events for 20 min)
 Invoke-RestMethod "http://$ip/state?name=test"      # LED test
 Invoke-RestMethod "http://$ip/status"               # status (JSON)
+Invoke-RestMethod "http://$ip/brightness?value=30"  # overall brightness 1-100 %
 ```
 
 ### 3c. Send hook events by hand
@@ -294,7 +303,8 @@ another device.
 | Symptom | Likely cause / fix |
 |---|---|
 | One LED never lights | LED is in backwards (long leg to the resistor/pin, short leg to GND). Check each one with `/state?name=test`. |
-| Green is very bright, red is dim | Normal, LEDs differ in efficiency. Lower `MAX_LEVEL_GREEN` in `config.h`. |
+| Too bright overall | Use the brightness slider on the status page. |
+| Green is very bright, red is dim | Normal, LEDs differ in efficiency. Lower `MAX_LEVEL_GREEN` in `config.h` to balance the colors. |
 | Upload fails (`Failed to connect` / `Write timeout`) | Close any open serial monitor (it holds the COM port). Enter download mode by hand: hold BOOT, tap EN, release BOOT, then upload. Make sure the USB cable carries data. |
 | Upload starts but the board drops out of download mode | esptool is resetting it. Make sure `board_upload.before_reset = no_reset` is in `platformio.ini`. |
 | Keeps rebooting (brownout) | Weak USB port or cable. Try another port or cable. |
@@ -335,7 +345,8 @@ Every request shows up on the serial monitor:
   real top-level field.
 - If the same state arrives again (e.g. back-to-back `PostToolUse`), the effect doesn't restart,
   so the breathing stays smooth.
-- PWM: LEDC, 5 kHz, 12 bits, brightness gamma-corrected with 2.2.
+- PWM: LEDC, 4 kHz, 14 bits, brightness gamma-corrected with 2.2. 14 bits keeps the breathing
+  effect smooth even with the overall brightness turned down low.
   The code builds with both the Arduino core 2.x and 3.x LEDC APIs.
 
 ### Running the scanner test on a PC

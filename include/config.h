@@ -13,10 +13,20 @@ constexpr uint8_t PIN_GREEN  = 25;
 
 // ---------------------------------------------------------------------------
 // PWM (LEDC)
-// 12 bits at 5 kHz: no flicker, and fine enough steps at low brightness.
+// 14 bits at 4 kHz: no visible flicker, and fine steps even when the light is turned
+// down low (12 bits made the bottom of the breathing effect look steppy).
+// The LEDC clock limits this: frequency * 2^bits must stay under 80 MHz.
 // ---------------------------------------------------------------------------
-constexpr uint32_t PWM_FREQ_HZ  = 5000;
-constexpr uint8_t  PWM_RES_BITS = 12;
+constexpr uint32_t PWM_FREQ_HZ  = 4000;
+constexpr uint8_t  PWM_RES_BITS = 14;
+
+// ---------------------------------------------------------------------------
+// Overall brightness (percent, perceived). Adjustable live from the status page or
+// GET /brightness?value=N, and saved to flash so it survives power cycles.
+// ---------------------------------------------------------------------------
+constexpr uint8_t  DEFAULT_BRIGHTNESS_PCT   = 50;    // Used until you change it the first time
+constexpr uint8_t  MIN_BRIGHTNESS_PCT       = 1;
+constexpr uint32_t BRIGHTNESS_SAVE_DELAY_MS = 2000;  // Save once the slider has been still this long
 
 // The eye perceives brightness non-linearly. Without gamma correction most of a fade
 // looks "fully on" and the dim end goes by in a flash.
