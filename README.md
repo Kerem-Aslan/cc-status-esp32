@@ -1,8 +1,12 @@
 # Claude Code Status Light (ESP32 + 3 LEDs)
 
-A desk traffic light that shows what Claude Code is doing right now. Claude Code's HTTP hooks
-POST straight to the ESP32 on every state change. No script or serial connection on the PC
-in between.
+A desk traffic light that shows what Claude Code is doing right now. On every state change a
+Claude Code hook runs a one-line `curl` that tells the ESP32 the event name. No scripts, no serial
+connection, nothing running in the background on the PC.
+
+**Privacy:** only the event name (e.g. `Stop`) goes over the network. Claude Code hands each hook
+a JSON payload with your prompt, file contents and command output; the installed hooks never send
+it. See [What goes over the network](#what-goes-over-the-network).
 
 | State | Hook event | LEDs |
 |---|---|---|
@@ -120,7 +124,7 @@ pio run -e ota -t upload
 - The password is the `OTA_PASSWORD` line in `include/secrets.h`; `tools/Flash-Ota.ps1` reads it
   from there. If you change the password, flash the new build **once over USB**: the firmware on
   the board still expects the old one.
-- The target IP is the `upload_port` line under `[env:ota]` in `platformio.ini`.
+- The target IP is the `custom_ota_ip` line under `[env:ota]` in `platformio.ini`.
 - If an upload is interrupted, the board keeps running the old firmware. The new firmware only
   takes over once it has been fully written and verified.
 - `pio run -t upload` (no environment) still flashes over USB.
@@ -169,9 +173,19 @@ Invoke-RestMethod "http://$ip/state?name=test"      # LED test
 Invoke-RestMethod "http://$ip/status"               # status (JSON)
 ```
 
-### 3c. Send the same bodies Claude Code sends
+### 3c. Send hook events by hand
 The hook endpoint returns **200 with an empty body**, so `Invoke-RestMethod` prints nothing.
 That's expected. Watch the LEDs and the `[hook] ...` lines on the serial monitor.
+
+This is exactly what the installed hooks send (event name only):
+
+```powershell
+Invoke-RestMethod -Method Post "http://$ip/claude-hook?event=UserPromptSubmit"   # red
+Invoke-RestMethod -Method Post "http://$ip/claude-hook?event=Notification"       # yellow
+Invoke-RestMethod -Method Post "http://$ip/claude-hook?event=Stop"               # green
+```
+
+The endpoint also accepts a full Claude Code JSON body, which lets you test the filtering rules:
 
 ```powershell
 $u = "http://$ip/claude-hook"
@@ -206,7 +220,9 @@ The script:
 - Adds only this project's entries, **keeping your existing settings and any other hooks**.
 - Replaces old entries if you run it again, so just rerun it when the IP changes.
 - `-WhatIf` shows the result without writing. `.\tools\Install-Hooks.ps1 -Uninstall` removes them.
-- `-Timeout 3` raises the per-hook timeout (default 2 s).
+- Installs `command` hooks that run `curl.exe` and send only the event name.
+  Older `type: "http"` entries from earlier versions are replaced automatically.
+- `-Timeout 3` gives the ESP32 more time to answer (default 2 s).
 
 Claude Code watches the settings file, so running sessions pick up the change. Then ask Claude
 Code something: the light should turn red, then green when the answer is done.
@@ -220,48 +236,56 @@ Code something: the light should turn red, then green when the answer is done.
 It goes under a top-level `"hooks"` key in `~/.claude/settings.json`. If the file already has
 `"hooks"`, append each group to the matching event's array and don't delete existing entries.
 
+Every entry has the same shape; only the event name in the URL changes:
+
 ```json
 "hooks": {
   "UserPromptSubmit": [
-    { "hooks": [ { "type": "http", "url": "http://192.168.1.50/claude-hook", "timeout": 2 } ] }
+    { "hooks": [ { "type": "command", "timeout": 5,
+      "command": "curl.exe -s --connect-timeout 2 -m 3 -X POST \"http://192.168.1.50/claude-hook?event=UserPromptSubmit\"; exit 0" } ] }
   ],
-  "PostToolUse": [
-    { "hooks": [ { "type": "http", "url": "http://192.168.1.50/claude-hook", "timeout": 2 } ] }
-  ],
-  "PostToolUseFailure": [
-    { "hooks": [ { "type": "http", "url": "http://192.168.1.50/claude-hook", "timeout": 2 } ] }
-  ],
+  "PostToolUse":        [ "...same, with ?event=PostToolUse..." ],
+  "PostToolUseFailure": [ "...same, with ?event=PostToolUseFailure..." ],
   "Notification": [
-    {
-      "matcher": "permission_prompt|elicitation_dialog",
-      "hooks": [ { "type": "http", "url": "http://192.168.1.50/claude-hook", "timeout": 2 } ]
-    }
+    { "matcher": "permission_prompt|elicitation_dialog",
+      "hooks": [ { "type": "command", "timeout": 5,
+      "command": "curl.exe -s --connect-timeout 2 -m 3 -X POST \"http://192.168.1.50/claude-hook?event=Notification\"; exit 0" } ] }
   ],
   "PreToolUse": [
-    {
-      "matcher": "AskUserQuestion|ExitPlanMode",
-      "hooks": [ { "type": "http", "url": "http://192.168.1.50/claude-hook", "timeout": 2 } ]
-    }
+    { "matcher": "AskUserQuestion|ExitPlanMode",
+      "hooks": [ { "type": "command", "timeout": 5,
+      "command": "curl.exe -s --connect-timeout 2 -m 3 -X POST \"http://192.168.1.50/claude-hook?event=PreToolUse\"; exit 0" } ] }
   ],
-  "Stop": [
-    { "hooks": [ { "type": "http", "url": "http://192.168.1.50/claude-hook", "timeout": 2 } ] }
-  ],
-  "StopFailure": [
-    { "hooks": [ { "type": "http", "url": "http://192.168.1.50/claude-hook", "timeout": 2 } ] }
-  ],
-  "SessionEnd": [
-    { "hooks": [ { "type": "http", "url": "http://192.168.1.50/claude-hook", "timeout": 2 } ] }
-  ]
+  "Stop":        [ "...same, with ?event=Stop..." ],
+  "StopFailure": [ "...same, with ?event=StopFailure..." ],
+  "SessionEnd":  [ "...same, with ?event=SessionEnd..." ]
 }
 ```
+- The command runs in Git Bash, or in PowerShell when Git Bash isn't installed; it works in both.
+- `; exit 0` keeps Claude Code from showing a "hook error" on every tool call while the ESP32 is off.
 - Events without a `matcher` always fire.
 - `PreToolUse` is limited to the two tools that ask you something. The firmware also ignores
   `PreToolUse` from any other tool.
 - `idle_prompt` is left out on purpose: it fires a while after a task ends and would turn green
   into yellow. The firmware ignores it as a second safety net.
-- `timeout` is in seconds. Field and event names were checked against the
+- `timeout` is Claude Code's own limit in seconds, a safety net above curl's.
+  Field and event names were checked against the
   [Claude Code hooks documentation](https://code.claude.com/docs/en/hooks) (November 2026).
 </details>
+
+### What goes over the network
+
+Claude Code gives every hook a JSON payload on stdin: your prompt (`UserPromptSubmit`), the full
+tool input and output (`PostToolUse`, e.g. a whole file that was read), Claude's last message
+(`Stop`), and so on. A `type: "http"` hook would POST all of that, unencrypted, to the ESP32.
+
+The installed hooks are `command` hooks instead. Their command never reads stdin; it only sends a
+fixed URL such as `http://<ip>/claude-hook?event=Stop`. So the only things on the wire are the
+event name and the ESP32's empty `200` reply. There's nothing worth encrypting, and a device that
+somehow ends up with the ESP32's IP learns only *when* Claude Code was busy.
+
+Still, give the ESP32 a fixed IP with a DHCP reservation (see above) so the address can't move to
+another device.
 
 ---
 
@@ -279,8 +303,8 @@ It goes under a top-level `"hooks"` key in `~/.claude/settings.json`. If the fil
 | Manual tests work, Claude Code doesn't change the light | Is `hook_count` going up on `http://<ip>/status`? If not: is the IP in `~/.claude/settings.json` correct? Start `claude --debug` and look for `Hooks:` lines. If an organization admin set `allowedHttpHookUrls`, this URL must be on that list. |
 | Light stays red after pressing Esc | Claude Code doesn't send `Stop` when you interrupt it. After 20 minutes with no events the light turns dim red, and your next message fixes it anyway. The timeout is `WORKING_STALE_MS` in `config.h`. Every tool call resets it; only a single command running longer than 20 minutes with no events in between triggers it early. |
 | Stays yellow after denying a permission | It can stay yellow until the next event arrives. |
-| The first update after a long idle sometimes gets missed | The first request after the network has been idle can take 1-2 s. If you see this, raise the timeout: `.\tools\Install-Hooks.ps1 -Ip $ip -Timeout 3`. |
-| Claude Code feels slow while the ESP32 is off | Each hook waits up to `timeout` (2 s) when the ESP32 is unreachable, and `PostToolUse` fires on every tool call. If the light will be off for a while, run `.\tools\Install-Hooks.ps1 -Uninstall`. |
+| The first update after a long idle sometimes gets missed | The first request after the network has been idle can take 1-2 s. If you see this, give curl more time: `.\tools\Install-Hooks.ps1 -Ip $ip -Timeout 3`. |
+| Claude Code feels slow while the ESP32 is off | Each hook's curl waits about 2 s for an unreachable ESP32, and `PostToolUse` fires on every tool call. If the light will be off for a while, run `.\tools\Install-Hooks.ps1 -Uninstall`. |
 | OTA: "Password rejected" | The board runs firmware built with a different `OTA_PASSWORD`. Flash once over USB. |
 | Several Claude Code windows open | For now the most recent event wins (see "Next steps"). |
 
@@ -301,8 +325,11 @@ Every request shows up on the serial monitor:
   in `loop()` based on `millis()`. Neither ever waits on the other; there's no `delay()`.
 - A request only writes the requested state into an atomic variable. The state machine and the
   LEDs change only inside `loop()`, so there are no cross-core races.
-- **Large bodies:** a `PostToolUse` body contains the tool's whole output and can be hundreds of KB.
-  The body is never buffered. `include/hook_scanner.h` reads it chunk by chunk and extracts only
+- **Two request forms:** the installed hooks send `?event=<name>` (plus optional `&type=` /
+  `&tool=`), so the ESP32 normally receives no body at all. It also accepts a full Claude Code JSON
+  body, for manual tests and for `type: "http"` hooks if you prefer those.
+- **Large JSON bodies:** a `PostToolUse` body contains the tool's whole output and can be hundreds
+  of KB. It is never buffered. `include/hook_scanner.h` reads it chunk by chunk and extracts only
   the top-level `hook_event_name`, `notification_type`, `tool_name` and `session_id` fields using
   ~230 bytes of RAM. A fake `"hook_event_name"` inside a tool's output can't be mistaken for the
   real top-level field.
@@ -324,7 +351,7 @@ include/secrets.example.h   WiFi/OTA template (copy to secrets.h)
 include/hook_scanner.h      Streaming JSON field reader
 src/main.cpp                State machine, effects, WiFi, HTTP server, OTA
 tools/Test-Light.ps1        Step-by-step manual test
-tools/Install-Hooks.ps1     Add/remove hooks in settings.json (with backup)
+tools/Install-Hooks.ps1     Add/remove the curl hooks in settings.json (with backup)
 tools/Flash-Ota.ps1         Firmware upload over WiFi (called by pio run -e ota -t upload)
 test/host/                  Host-side test for the scanner
 ```
@@ -333,10 +360,12 @@ test/host/                  Host-side test for the scanner
 
 ## 6. Next steps (the code is ready for these)
 
-- **Physical approve/deny buttons:** the `PermissionRequest` hook can return a decision in its HTTP
-  response: `{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}`
+- **Physical approve/deny buttons:** a `PermissionRequest` hook can return a decision:
+  `{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}`
   (or `"deny"`). There's a comment for this in `onHookRequest()`. The async server can hold the
-  request and answer it when a button is pressed. That hook needs a timeout longer than 2 s.
-- **Multiple sessions:** `session_id` is already parsed (`HookBodyScanner::sessionId`). A
-  per-session state table with "any session waiting -> yellow" priority can be added after
-  `mapHookEvent()`. Remove a session from the table when its `SessionEnd` arrives.
+  request and answer it when a button is pressed; the hook command would print the ESP32's reply
+  to stdout. That hook needs a timeout longer than a few seconds.
+- **Multiple sessions:** the JSON form already parses `session_id` (`HookBodyScanner::sessionId`).
+  The curl hooks would need to pass it along too, e.g. as `&session=`, which means reading it from
+  stdin. A per-session state table with "any session waiting -> yellow" priority can then be
+  added after `mapHookEvent()`.

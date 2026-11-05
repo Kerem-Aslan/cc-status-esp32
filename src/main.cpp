@@ -1,7 +1,8 @@
 // Claude Code Status Light - ESP32 firmware
 //
-// Claude Code HTTP hooks POST to /claude-hook on every state change.
-// The LEDs follow the "hook_event_name" field of the request body:
+// Claude Code hooks POST to /claude-hook on every state change, either as
+// /claude-hook?event=<name> (what tools/Install-Hooks.ps1 sets up: only the event name is sent)
+// or with the hook's JSON body (manual tests / type:"http" hooks). The LEDs follow the event:
 //
 //   UserPromptSubmit, PostToolUse, PostToolUseFailure -> Working : red breathing
 //   Notification (permission_prompt / elicitation)    -> Waiting : yellow blinking
@@ -380,8 +381,18 @@ bool notificationNeedsUser(const char* type) {
 // PreToolUse fires before every tool. Only tools that ask the user turn the light yellow:
 // AskUserQuestion (Claude asks you a question) and ExitPlanMode (waiting for plan approval).
 // Other tools don't change the state. The matcher in settings.json is limited to these two too.
+// If the tool name is missing (query-string hooks, where the matcher already filtered), go yellow.
 bool toolAsksUser(const char* tool) {
-  return strcmp(tool, "AskUserQuestion") == 0 || strcmp(tool, "ExitPlanMode") == 0;
+  return tool[0] == '\0' || strcmp(tool, "AskUserQuestion") == 0 ||
+         strcmp(tool, "ExitPlanMode") == 0;
+}
+
+// Copies a query parameter into a fixed-size scanner field (empty if missing).
+void copyParam(AsyncWebServerRequest* req, const char* name, char* dst, size_t size) {
+  dst[0] = '\0';
+  if (!req->hasParam(name)) return;
+  strncpy(dst, req->getParam(name)->value().c_str(), size - 1);
+  dst[size - 1] = '\0';
 }
 
 uint8_t mapHookEvent(const HookBodyScanner& sc) {
@@ -415,6 +426,19 @@ void onHookBody(AsyncWebServerRequest* req, uint8_t* data, size_t len, size_t in
 void onHookRequest(AsyncWebServerRequest* req) {
   g_gotAnyRequest.store(true);
   auto* sc = static_cast<HookBodyScanner*>(req->_tempObject);
+
+  // Privacy-friendly form used by the installed hooks: only the event name travels in the URL,
+  //   POST /claude-hook?event=Stop   (optional &type=<notification_type> &tool=<tool_name>)
+  // and the hook's JSON (prompts, file contents, command output) never leaves the PC.
+  // The JSON-body form below is still supported for manual tests and type:"http" hooks.
+  HookBodyScanner fromQuery;
+  if (req->hasParam("event")) {
+    fromQuery.reset();
+    copyParam(req, "event", fromQuery.hookEventName, sizeof(fromQuery.hookEventName));
+    copyParam(req, "type", fromQuery.notificationType, sizeof(fromQuery.notificationType));
+    copyParam(req, "tool", fromQuery.toolName, sizeof(fromQuery.toolName));
+    sc = &fromQuery;
+  }
 
   if (sc != nullptr && sc->hookEventName[0] != '\0') {
     const uint8_t target = mapHookEvent(*sc);

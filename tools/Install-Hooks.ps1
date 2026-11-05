@@ -5,8 +5,12 @@
 .DESCRIPTION
   Never overwrites your existing settings: the file is read, only this project's entries
   are added under "hooks", and a backup is made before saving. This project's entries are
-  recognized by their URL ending in "/claude-hook". Running the script again replaces the
-  old entries with new ones, so just rerun it when the IP changes.
+  recognized by "/claude-hook" in their URL or command. Running the script again replaces
+  the old entries with new ones, so just rerun it when the IP changes.
+
+  Each hook is a one-line command that runs curl.exe and sends ONLY the event name, e.g.
+  POST http://<ip>/claude-hook?event=Stop. The hook's JSON input (your prompt, file
+  contents, command output) is never sent over the network.
 
 .EXAMPLE
   .\tools\Install-Hooks.ps1 -Ip 192.168.1.50
@@ -27,9 +31,9 @@ param(
 
   [string]$SettingsPath = (Join-Path $HOME '.claude\settings.json'),
 
-  # Per-hook timeout in seconds. When the ESP32 is off, Claude Code waits at most this long.
+  # Seconds curl waits for the ESP32. When the ESP32 is off, each hook waits about this long.
   [Parameter(ParameterSetName = 'Install')]
-  [ValidateRange(1, 60)]
+  [ValidateRange(1, 30)]
   [int]$Timeout = 2,
 
   # Skip the reachability check before installing
@@ -55,7 +59,17 @@ $Events = [ordered]@{
 }
 
 function Test-IsOurHook($hook) {
-  return ($hook.type -eq 'http') -and ("$($hook.url)" -like "*$HookPath")
+  # Current form: command hooks running curl.exe. Older form: type "http" hooks.
+  return (($hook.type -eq 'command') -and ("$($hook.command)" -like "*$HookPath`?event=*")) -or
+         (($hook.type -eq 'http') -and ("$($hook.url)" -like "*$HookPath"))
+}
+
+# One-line hook command. It works in both shells Claude Code uses on Windows (Git Bash, or
+# PowerShell when Git Bash isn't installed). "; exit 0" keeps Claude Code from showing a
+# "hook error" on every tool call while the ESP32 is off.
+function New-HookCommand([string]$eventName) {
+  $max = $Timeout + 1
+  return "curl.exe -s --connect-timeout $Timeout -m $max -X POST `"http://$Ip$HookPath`?event=$eventName`"; exit 0"
 }
 
 # Removes this project's entries under hooks, and drops groups/events that become empty.
@@ -123,7 +137,8 @@ if (-not $Uninstall) {
   foreach ($name in $Events.Keys) {
     $group = [ordered]@{}
     if ($Events[$name]) { $group.matcher = $Events[$name] }
-    $group.hooks = @([pscustomobject][ordered]@{ type = 'http'; url = $url; timeout = $Timeout })
+    # Claude Code's own timeout is a safety net a few seconds above curl's.
+    $group.hooks = @([pscustomobject][ordered]@{ type = 'command'; command = (New-HookCommand $name); timeout = $Timeout + 3 })
     $groupObj = [pscustomobject]$group
 
     if ($hooks.PSObject.Properties[$name]) {
@@ -151,7 +166,8 @@ if ($PSCmdlet.ShouldProcess($SettingsPath, $(if ($Uninstall) { 'Remove hooks' } 
     Write-Host "$removed hook(s) removed." -ForegroundColor Green
   } else {
     if ($removed) { Write-Host "Removed $removed old entr$(if ($removed -eq 1) {'y'} else {'ies'})." }
-    Write-Host "Hooks added for $($Events.Count) events -> $url (timeout $Timeout s)" -ForegroundColor Green
+    Write-Host "Hooks added for $($Events.Count) events -> $url`?event=... (timeout $Timeout s)" -ForegroundColor Green
+    Write-Host "Only event names are sent; prompts and file contents stay on this PC."
     Write-Host "Claude Code watches the settings file, so running sessions pick this up too."
   }
 } else {

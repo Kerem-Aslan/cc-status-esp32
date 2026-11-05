@@ -24,20 +24,35 @@ if (-not $m) { throw "No OTA_PASSWORD line in include\secrets.h." }
 $password = $m.Matches[0].Groups[1].Value
 
 # Grab the device uptime before uploading; a lower value afterwards means it restarted.
-try { $before = Invoke-RestMethod "http://$Ip/status" -TimeoutSec 5 }
-catch { throw "Can't reach the ESP32 (http://$Ip/status). Is it powered on and on the same network?" }
+# After the network has been idle, the first packets to the ESP32 are often lost while the
+# PC re-resolves its address, so retry a few times before giving up.
+$before = $null
+for ($attempt = 1; $attempt -le 5 -and -not $before; $attempt++) {
+  try { $before = Invoke-RestMethod "http://$Ip/status" -TimeoutSec 4 }
+  catch {
+    if ($attempt -eq 1) { Write-Host -NoNewline "Waiting for the ESP32 to answer" }
+    Write-Host -NoNewline "."
+  }
+}
+if (-not $before) {
+  Write-Host ""
+  throw "Can't reach the ESP32 (http://$Ip/status). Is it powered on and on the same network?"
+}
+if ($attempt -gt 2) { Write-Host " ok" }
 
-$size = [math]::Round((Get-Item -LiteralPath $Bin).Length / 1KB)
+$size = [math]::Round(([IO.FileInfo](Resolve-Path -LiteralPath $Bin).Path).Length / 1KB)
 Write-Host "Uploading: $size KB -> http://$Ip/update  (the light will blink yellow/green)"
 
 # Pass the password through a temporary curl config file so it doesn't show up in the process list
-$cfg = New-TemporaryFile
+# (.NET call instead of New-TemporaryFile: that cmdlet can be missing when Windows PowerShell 5.1
+#  is started from PowerShell 7, which is how PlatformIO may launch this script.)
+$cfg = [IO.Path]::GetTempFileName()
 try {
-  Set-Content -LiteralPath $cfg -Value "user = `"ota:$password`"" -Encoding ascii
+  [IO.File]::WriteAllText($cfg, "user = `"ota:$password`"", [Text.Encoding]::ASCII)
   $out = & curl.exe -sS --fail-with-body --max-time 180 -K $cfg -F "firmware=@$Bin" "http://$Ip/update" 2>&1
   $code = $LASTEXITCODE
 } finally {
-  Remove-Item -LiteralPath $cfg -Force -ErrorAction SilentlyContinue
+  if ([IO.File]::Exists($cfg)) { [IO.File]::Delete($cfg) }
 }
 if ($code -ne 0) {
   if ("$out" -match '401') { throw "Password rejected. The firmware on the board may have been built with a different OTA_PASSWORD; flash once over USB." }
