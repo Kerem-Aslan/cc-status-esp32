@@ -1,0 +1,10 @@
+# PlatformIO build output
+.pio/
+.vscode/
+
+# WiFi and OTA credentials: never commit
+include/secrets.h
+
+# Host test binary
+scanner_test.exe
+scanner_test
