@@ -4,6 +4,14 @@ A desk traffic light that shows what Claude Code is doing right now. On every st
 Claude Code hook runs a one-line `curl` that tells the ESP32 the event name. No scripts, no serial
 connection, nothing running in the background on the PC.
 
+<table>
+  <tr>
+    <td align="center"><img src="photos/working-red.jpg" width="260" alt="ESP32 board next to a mini breadboard on a wall; the top red LED is lit"><br><b>Working</b><br>red breathing</td>
+    <td align="center"><img src="photos/done-green.jpg" width="260" alt="Same setup with only the bottom green LED lit"><br><b>Done</b><br>solid green</td>
+    <td align="center"><img src="photos/error-all.jpg" width="260" alt="Same setup with red, yellow and green LEDs all lit"><br><b>Error</b><br>all three blink</td>
+  </tr>
+</table>
+
 **Privacy:** only the event name (e.g. `Stop`) goes over the network. Claude Code hands each hook
 a JSON payload with your prompt, file contents and command output; the installed hooks never send
 it. See [What goes over the network](#what-goes-over-the-network).

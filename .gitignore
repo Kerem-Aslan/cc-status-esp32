@@ -8,3 +8,6 @@ include/secrets.h
 # Host test binary
 scanner_test.exe
 scanner_test
+
+# Original phone photos carry EXIF/GPS metadata; only the cleaned JPEGs are committed
+photos/*.heic
